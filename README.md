@@ -1,3 +1,3 @@
 # polybessel
 
-!(logo.png)
+![](logo.png)
