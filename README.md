@@ -1,3 +1,3 @@
 # polybessel
 
-<img src="logo.png" alt="logo" width="200"/>
+<img src="logo.png" alt="logo" width="400"/>
