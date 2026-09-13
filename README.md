@@ -1,3 +1,3 @@
 # polybessel
 
-![](logo.png|100)
+<img src="logo.png" alt="logo" width="200"/>
