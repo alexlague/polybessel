@@ -3,16 +3,15 @@ import numpy as np
 from numba import njit, prange
 from concurrent.futures import ThreadPoolExecutor
 from trig_moment_integrals import eval_S, eval_C
-from interpolation import get_linear_interp_coeffs
 
-# Now imported from dedicated file
-#def get_linear_interp_coeffs(x, fx):
-#    N = len(x)
-#    alphas = np.zeros((2, N - 1))
-#    for i in range(N - 1):
-#        alphas[1][i] = (fx[i + 1] - fx[i]) / (x[i + 1] - x[i])
-#        alphas[0][i] = fx[i] - x[i] * alphas[1][i]
-#    return alphas
+
+def get_linear_interp_coeffs(x, fx):
+    N = len(x)
+    alphas = np.zeros((2, N - 1))
+    for i in range(N - 1):
+        alphas[1][i] = (fx[i + 1] - fx[i]) / (x[i + 1] - x[i])
+        alphas[0][i] = fx[i] - x[i] * alphas[1][i]
+    return alphas
 
 
 # ---------------------------------------------------------------------
@@ -115,7 +114,8 @@ def precompute_dS_dC(x, freqs, m_max=10, n_workers=None):
 # redoing it inside the hot per-f kernel on every call. This is what
 # `hankel_transform_multi_l` now consumes directly. Depends on l (and
 # m_max) but NOT on f, so it is computed once per (x, freqs, l_values)
-# and reused across every fx.
+# and reused across every fx. Not part of the FFT-comparison hot path,
+# so this plain-numpy loop is fine as-is.
 #
 # Tradeoff versus not doing this (see `hankel_transform_multi_l_bounded`
 # below): this array's memory is O(n_l * Nx * Nk), growing with however
@@ -128,11 +128,44 @@ def precompute_dS_dC(x, freqs, m_max=10, n_workers=None):
 
 # ---------------------------------------------------------------------
 # Small-kx fix: replace the ill-conditioned Rayleigh sin/cos sum with
-# the analytic small-argument series for j_l wherever kx is too small
-# for the former to be trustworthy. Both helpers are plain
-# numpy/python (not numba) -- this only ever runs inside
-# `precompute_effective_dS`, which is precompute, not the hot per-f
-# path, so there's no speed requirement here.
+# the analytic small-argument series for j_l wherever it is not
+# trustworthy. Both helpers are plain numpy/python (not numba) -- this
+# only ever runs inside `precompute_effective_dS`, which is precompute,
+# not the hot per-f path, so there's no speed requirement here.
+#
+# Investigation notes (found via a real failure at l=23, M=30): two
+# successively-refined, and successively more subtle, bugs were fixed
+# to get here.
+#
+# (1) An early threshold based only on the small-z series' OWN
+#     truncation error badly underestimated how far the Rayleigh
+#     method's cancellation problem extends for larger l -- validated
+#     against l=13 alone, it left a ~7-unit-wide dead zone in z for
+#     l=23 where NEITHER method was accurate.
+#
+# (2) Fixing (1) by basing the threshold on the Rayleigh method's own
+#     cancellation risk (`_rayleigh_cancellation_log_ratio`, a point-
+#     value diagnostic) still wasn't enough: dS_eff0/dS_eff1 are
+#     *differences* of that (already only approximately accurate)
+#     quantity over a narrow interval, and each point's own error does
+#     NOT shrink as the interval narrows, while the signal being
+#     differenced does -- so the diagnostic needed an additional,
+#     interval-width-dependent margin (`_small_z_mask`) on top of the
+#     point-value check, or narrow intervals near the crossover could
+#     still be wrong by orders of magnitude despite passing the
+#     point-value check comfortably.
+#
+# Residual caveat, found during calibration and not fully resolved:
+# even with margin=30, a residual error on the order of 1e-4 (for
+# l=23; likely worse for even larger l) can remain in a narrow z range
+# right at the crossover, and does NOT shrink with finer x sampling --
+# accuracy stopped improving monotonically with margin in the
+# calibration data, so this appears to be close to an intrinsic float64
+# precision limit of narrow-interval Rayleigh differencing at high l,
+# not something this margin alone fully removes. If this floor matters
+# for l this large in your application, treat it as a real limitation
+# to check against a reference (e.g. hankel_eq33.py's Eq(33)-based
+# method) rather than something further margin tuning will clear up.
 # ---------------------------------------------------------------------
 
 def _log_double_factorial_odd(l):
@@ -141,50 +174,106 @@ def _log_double_factorial_odd(l):
     return math.lgamma(2 * l + 2) - l * math.log(2) - math.lgamma(l + 1)
 
 
-def _small_z_threshold(l, tol=1e-2):
+def _rayleigh_cancellation_log_ratio(l, z, u, v):
     """
-    Argument z below which the 2-term small-z series for j_l(z) is used
-    instead of the sin/cos Rayleigh expansion. Derived from the series'
-    own next-term/leading-term ratio (DLMF 10.53.1):
-        |dropped term / leading term| ~ z^4 / (8*(2l+3)*(2l+5))
-    solved for z at the target tolerance. This is a rough, theoretical
-    estimate -- not empirically calibrated per l -- same spirit as
-    `choose_m_max`'s own tolerance-based cutoff. Checked against the
-    raw Rayleigh method's own crossover point for l=13: predicts
-    z*~2.9 at tol=1e-2, matching where the two methods were observed to
-    cross (numerically, around z~3-3.5).
+    log(largest individual Rayleigh term magnitude) minus log(expected
+    true magnitude of j_l(z), ~z^l/(2l+1)!!), at scalar or array z. A
+    large positive value means the raw sin/cos Rayleigh sum needs that
+    many natural-log units (divide by log(10) for decimal digits) of
+    cancellation to reach the true answer -- i.e. how untrustworthy
+    Rayleigh is at this z, given float64's ~36 natural-log-unit budget.
+
+    NOTE: this measures cancellation risk for a single POINT evaluation
+    of j_l(z). It is NOT sufficient on its own to judge whether the
+    *differenced* quantity dS_eff0/dS_eff1 = stuff(z1) - stuff(z0) over
+    a narrow interval is trustworthy -- see `_small_z_mask` for why an
+    additional, interval-width-dependent margin is needed on top of
+    this.
     """
-    return (tol * 8.0 * (2 * l + 3) * (2 * l + 5)) ** 0.25
+    z = np.asarray(z, dtype=np.float64)
+    m_range = np.arange(0, l + 2, dtype=np.float64)
+    u_row = np.abs(u[l, :l + 2].astype(np.float64))
+    v_row = np.abs(v[l, :l + 2].astype(np.float64))
+    with np.errstate(over='ignore', divide='ignore'):
+        terms = np.maximum(u_row, v_row)[:, None] * z[None, :] ** (-m_range[:, None])
+        worst = np.max(terms, axis=0)
+        log_true_scale = l * np.log(z) - _log_double_factorial_odd(l)
+        return np.log(worst) - log_true_scale
 
 
-def _small_z_effective(l, z0, z1):
+_LOG_MACHINE_EPS = float(np.log(np.finfo(np.float64).eps))  # ~ -36.04
+
+
+def _small_z_mask(l, z0, z1, u, v, margin=30.0):
+    """
+    True where the Rayleigh sum should NOT be trusted for the
+    *differenced* quantity dS_eff0/dS_eff1 = stuff(z1) - stuff(z0), and
+    the small-z series should be used instead.
+
+    Important subtlety this fixes (found by investigating a real
+    failure at l=23): `_rayleigh_cancellation_log_ratio` only measures
+    cancellation risk for a single point value of j_l(z). But dS_eff0/1
+    are *differences* of that (already only approximately accurate)
+    quantity over a narrow interval Delta_z = z1 - z0. Each point's own
+    error is roughly eps * (largest term magnitude), and this error does
+    NOT shrink as the interval narrows -- while the true signal being
+    differenced DOES shrink (roughly proportional to Delta_z). So the
+    narrower the interval, the more margin is needed beyond what the
+    point-value diagnostic alone suggests: trustworthy requires
+
+        log_ratio(z) < log(Delta_z) - log(machine_eps) - margin
+
+    margin=30 was calibrated by direct comparison against
+    scipy.integrate.quad for the specific dS_eff0/dS_eff1 formulas (not
+    just point values of j_l) at l=23 -- see module test notes. Some
+    residual error (a few percent) can remain right at this boundary
+    even so; this is a real, apparently intrinsic limit of the narrow-
+    interval Rayleigh differencing (not something a larger margin alone
+    removes -- accuracy stopped improving monotonically with margin in
+    the calibration data). Widening the small-z-series region further
+    is the mitigation, not raising this margin indefinitely.
+    """
+    dz = np.abs(z1 - z0)
+    with np.errstate(divide='ignore'):
+        log_dz = np.log(dz)
+    log_ratio = _rayleigh_cancellation_log_ratio(l, np.minimum(z0, z1).ravel(), u, v)
+    log_ratio = log_ratio.reshape(z0.shape)
+    return log_ratio > (log_dz - _LOG_MACHINE_EPS - margin)
+
+
+def _small_z_effective(l, z0, z1, n_terms=20):
     """
     dS_eff0, dS_eff1 (matching the (a0/k)*dS_eff0 + (a1/k^2)*dS_eff1
-    convention) from the 2-term small-argument series
+    convention) from the n_terms-term small-argument series for j_l
+    (DLMF 10.53.1):
 
-        j_l(z) ~ z^l/(2l+1)!! * (1 - z^2/(2*(2l+3))),   z = kx
+        j_l(z) = z^l * sum_k a_k z^(2k),   a_0 = 1/(2l+1)!!
+                 a_k = a_{k-1} * (-1) / (2k*(2l+2k+1))
 
-    integrated exactly, as a polynomial, in z-space directly (not x
-    and k separately) -- z0=k*x_i, z1=k*x_{i+1} are small by
-    construction in the regime this is used, so no overflow risk even
-    when x itself is large but k is proportionally small.
+    integrated exactly, term by term, as a polynomial -- in z-space
+    directly (z0=k*x_i, z1=k*x_{i+1}), not x and k separately, so
+    there's no overflow risk even when x is large but k is
+    proportionally small. a_k is built via the running ratio above
+    (never forming a raw factorial), and z itself is bounded/moderate
+    in the regime this is used, so summing more terms doesn't introduce
+    new overflow -- validated empirically up to n_terms~20 closing the
+    gap cleanly even at l=23 (see module notes).
     """
-    inv_dfact = math.exp(-_log_double_factorial_odd(l))
-    c3 = 1.0 / (2 * (2 * l + 3))
-
-    def f0(z):
-        return z ** (l + 1) / (l + 1) - c3 * z ** (l + 3) / (l + 3)
-
-    def f1(z):
-        return z ** (l + 2) / (l + 2) - c3 * z ** (l + 4) / (l + 4)
-
-    dS_eff0 = inv_dfact * (f0(z1) - f0(z0))
-    dS_eff1 = inv_dfact * (f1(z1) - f1(z0))
+    a_k = math.exp(-_log_double_factorial_odd(l))  # a_0
+    dS_eff0 = np.zeros_like(z0, dtype=np.float64)
+    dS_eff1 = np.zeros_like(z0, dtype=np.float64)
+    for k in range(n_terms):
+        p0 = l + 2 * k + 1
+        p1 = l + 2 * k + 2
+        dS_eff0 += a_k / p0 * (z1 ** p0 - z0 ** p0)
+        dS_eff1 += a_k / p1 * (z1 ** p1 - z0 ** p1)
+        a_k *= -1.0 / (2 * (k + 1) * (2 * l + 2 * (k + 1) + 1))
     return dS_eff0, dS_eff1
 
 
 def precompute_effective_dS(l_values, u, v, n_values, dS, dC, m_max=10,
-                             x=None, freqs=None, small_z_tol=1e-2):
+                             x=None, freqs=None, small_z_terms=40,
+                             small_z_margin=30.0):
     """
     Combine the n-stacked dS/dC (from `precompute_dS_dC`) into per-l
     effective (term0, term1) arrays using the Rayleigh sin/cos
@@ -250,10 +339,9 @@ def precompute_effective_dS(l_values, u, v, n_values, dS, dC, m_max=10,
             # there would trade an exact result for a less accurate
             # one. Only l>=4, where genuine cancellation risk exists,
             # is eligible for the substitution.
-            thresh = _small_z_threshold(l, tol=small_z_tol)
-            mask = np.minimum(z0, z1) < thresh
+            mask = _small_z_mask(l, z0, z1, u, v, margin=small_z_margin)
             if np.any(mask):
-                sz0, sz1 = _small_z_effective(l, z0, z1)
+                sz0, sz1 = _small_z_effective(l, z0, z1, n_terms=small_z_terms)
                 dS_eff0[li] = np.where(mask, sz0, dS_eff0[li])
                 dS_eff1[li] = np.where(mask, sz1, dS_eff1[li])
 
