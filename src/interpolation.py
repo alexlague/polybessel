@@ -4,6 +4,7 @@
 
 import numpy as np
 from numba import jit, vectorize
+from scipy.fft import dct
 
 @jit(nopython=True)
 def get_linear_interp_coeffs(x, fx):
@@ -75,6 +76,8 @@ def RDP_subsample(x, y, abs_tol=1e-6, rel_tol=1e-2):
 
     return np.array(sorted(keep))
 
+# Replaced with function which only interpolates the "easy" region
+# from x: 0 to l
 @jit(nopython=True) # make parallel?
 def interp_jl(xinterp, jl_table, l, xeval):
     """
@@ -125,6 +128,88 @@ def interp_jl(xinterp, jl_table, l, xeval):
             res[j] = taylor
     
     return res
+
+#############################################
+# Chebyshev decomposition and interpolation
+#############################################
+
+# The use case here is to compute the nodes for 8
+# Cheb points in the domain a, b
+
+def Cheb_coeffs_dct(f_at_nodes):
+    """
+    Compute the Chebyshev coefficients of the expansion of f
+    """
+    N = len(f_at_nodes)-1
+    # Compute DCT-I (norm=None ensures unnormalized/raw analytical mapping)
+    # Note: SciPy orders DCT output matching the node ordering.
+    c = dct(f_at_nodes, type=1) / N
+    
+    # Correct the boundary scaling definitions 
+    # Standard Chebyshev series halves the c_0 and c_N terms
+    c[0] /= 2
+    c[-1] /= 2
+    
+    # Because u goes from 1 to -1 (descending), flip the coefficients 
+    # to fit standard ascending polynomial orders [c0, c1, ..., cN]
+    c = c * (-1) ** np.arange(N + 1)
+
+    return c
+
+
+@jit(nopython=True, fastmath=True)
+def cheb8(c, x, a, b):
+    """Evaluate sum_{k=0}^{7} c[k] * T_k(t), t = (2x - a - b) / (b - a), at points x."""
+    # Chebyshev -> monomial coefficients in t (from T_0..T_7)
+    m0 = c[0] - c[2] + c[4] - c[6]
+    m1 = c[1] - 3.0*c[3] + 5.0*c[5] - 7.0*c[7]
+    m2 = 2.0*c[2] - 8.0*c[4] + 18.0*c[6]
+    m3 = 4.0*c[3] - 20.0*c[5] + 56.0*c[7]
+    m4 = 8.0*c[4] - 48.0*c[6]
+    m5 = 16.0*c[5] - 112.0*c[7]
+    m6 = 32.0*c[6]
+    m7 = 64.0*c[7]
+ 
+    # fold the domain scaling in: t = s*(x - mid)  =>  m_k -> m_k * s^k
+    mid = 0.5 * (a + b)
+    s = 2.0 / (b - a)
+    m1 *= s; s2 = s*s
+    m2 *= s2; m3 *= s2*s
+    s4 = s2*s2
+    m4 *= s4; m5 *= s4*s; m6 *= s4*s2; m7 *= s4*s2*s
+ 
+    out = np.empty_like(x)
+    for i in range(x.size):
+        u = x[i] - mid
+        out[i] = ((((((m7*u + m6)*u + m5)*u + m4)*u + m3)*u + m2)*u + m1)*u + m0
+    return out[::-1]
+
+@jit(nopython=True)
+def cheb8_deriv(c, x, a, b):
+    """Derivative d/dx of sum_{k=0}^{7} c[k] T_k(t) on [a, b], at points x."""
+    s = 2.0 / (b - a)          # chain rule: dt/dx
+    d = np.empty(8)
+    d[7] = 0.0
+    d[6] = 14.0 * c[7]
+    d[5] = 12.0 * c[6]
+    d[4] = d[6] + 10.0 * c[5]
+    d[3] = d[5] + 8.0 * c[4]
+    d[2] = d[4] + 6.0 * c[3]
+    d[1] = d[3] + 4.0 * c[2]
+    d[0] = 0.5 * d[2] + c[1]
+    for k in range(7):
+        d[k] *= s
+    return -cheb8(d, x, a, b)
+
+
+@jit(nopython=True)
+def cheb8_deriv_endpoints(c, a, b):
+    """Return (p'(a), p'(b)) using T_k'(1) = k^2 and T_k'(-1) = (-1)^(k+1) k^2."""
+    s = 2.0 / (b - a)
+    even = 4.0*c[2] + 16.0*c[4] + 36.0*c[6]
+    odd = c[1] + 9.0*c[3] + 25.0*c[5] + 49.0*c[7]
+    return -s * (odd + even), -s * (odd - even)
+
 
 '''
 @jit(nopython=True)
