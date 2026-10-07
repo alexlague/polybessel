@@ -5,6 +5,7 @@
 import numpy as np
 from numba import jit, vectorize
 from scipy.fft import dct
+import math
 
 @jit(nopython=True)
 def get_linear_interp_coeffs(x, fx):
@@ -152,7 +153,7 @@ def Cheb_coeffs_dct(f_at_nodes):
     
     # Because u goes from 1 to -1 (descending), flip the coefficients 
     # to fit standard ascending polynomial orders [c0, c1, ..., cN]
-    c = c * (-1) ** np.arange(N + 1)
+    #c = c * (-1) ** np.arange(N + 1)
 
     return c
 
@@ -182,7 +183,7 @@ def cheb8(c, x, a, b):
     for i in range(x.size):
         u = x[i] - mid
         out[i] = ((((((m7*u + m6)*u + m5)*u + m4)*u + m3)*u + m2)*u + m1)*u + m0
-    return out[::-1]
+    return out
 
 @jit(nopython=True)
 def cheb8_deriv(c, x, a, b):
@@ -199,7 +200,7 @@ def cheb8_deriv(c, x, a, b):
     d[0] = 0.5 * d[2] + c[1]
     for k in range(7):
         d[k] *= s
-    return -cheb8(d, x, a, b)
+    return cheb8(d, x, a, b)
 
 
 @jit(nopython=True)
@@ -209,6 +210,56 @@ def cheb8_deriv_endpoints(c, a, b):
     even = 4.0*c[2] + 16.0*c[4] + 36.0*c[6]
     odd = c[1] + 9.0*c[3] + 25.0*c[5] + 49.0*c[7]
     return -s * (odd + even), -s * (odd - even)
+
+
+
+@jit(nopython=True, inline='always')
+def _jv_table_scalar(row, scale, imax, z):
+    p = z * scale
+    i = int(p)
+    if i < 1:
+        i = 1
+    elif i > imax:
+        i = imax
+    t = p - i
+    y0 = row[i-1]; y1 = row[i]; y2 = row[i+1]; y3 = row[i+2]
+    return y1 + 0.5 * t * (y2 - y0 + t * (2.0*y0 - 5.0*y1 + 4.0*y2 - y3
+                           + t * (3.0*(y1 - y2) + y3 - y0)))
+
+@jit(nopython=True, inline='always')
+def _jv_debye_scalar(nu, nu2, nu3, z):
+    s = math.sqrt(z*z - nu2)
+    c = nu / s
+    c2 = c * c
+    c4 = c2 * c2
+    c6 = c4 * c2
+    A = 1.0 - (81.0*c2 + 462.0*c4 + 385.0*c6) / 1152.0 / nu2
+    B = (3.0*c + 5.0*c2*c) / 24.0 / nu \
+        - c2*c * (30375.0 + 369603.0*c2 + 765765.0*c4 + 425425.0*c6) / 414720.0 / nu3
+    xi = s - nu * math.acos(nu / z) - 0.25*math.pi
+    return math.sqrt(2.0 / (math.pi * s)) * (A*math.cos(xi) + B*math.sin(xi))
+
+@jit(nopython=True, fastmath=True)
+def jv_interpolation(table, nu, x):
+    """
+    J_nu(x) for integer 1 <= nu <= table.shape[0]-1:
+    tabulated (cubic) for x < 2*nu, Debye expansion for x >= 2*nu.
+    """
+    row = table[nu]
+    scale = (row.shape[0] - 1) / (2.0 * nu)
+    imax = row.shape[0] - 3
+    nuf = float(nu)
+    nu2 = nuf * nuf
+    nu3 = nu2 * nuf
+    xmax = 2.0 * nuf
+    out = np.empty(x.shape[0])
+    for j in range(x.shape[0]):
+        z = x[j]
+        if z < xmax:
+            out[j] = _jv_table_scalar(row, scale, imax, z)
+        else:
+            out[j] = _jv_debye_scalar(nuf, nu2, nu3, z)
+    return out
 
 
 '''

@@ -4,31 +4,41 @@
 ##
 
 import numpy as np
-from scipy.special import eval_legendre, spherical_jn
+from scipy.special import eval_legendre, spherical_jn, jv
 from numba import jit, vectorize, set_num_threads
 from joblib import Parallel, delayed
+import math
 
-#from integration import clenshaw_curtis_any_interval #filon_sin_quad, filon_cos_quad
-from interpolation import interp_jl
-from single_bessel_recurrence import precompute_dI_eq33, hankel_transform_multi_l_eq33
+from integration import weights_clenshaw_curtis, nodes_clenshaw_curtis #clenshaw_curtis_any_interval #filon_sin_quad, filon_cos_quad
+from interpolation import Cheb_coeffs_dct
+#from single_bessel_recurrence import precompute_dI_eq33, hankel_transform_multi_l_eq33
+from main_integration import main_integration_Bessel_product # move to integration?
 
 class PolyBessel:
-    def __init__(self, xs, ls, freqs, interp_spacing=0.03, n_proc=4, x_pad=0.7):
+    def __init__(self, max_order=100, spherical_bessel=False, n_proc=4, n_cheb_max=2048, n_cheb_min=16, n_interp=4096):
         """
         """
-        self.xs = xs
-        self.ls = ls
-        self.freqs = freqs
+        #xs, ls, freqs, interp_spacing=0.03, n_proc=4, x_pad=0.7):
+        #self.xs = xs
+        #self.ls = ls
+        #self.freqs = freqs
         
-        self.x_min = np.min(xs)
-        self.x_max = np.max(xs)
-        self.l_min = np.min(ls)
-        self.l_max = np.max(ls)
-        self.freq_min = np.min(freqs)
-        self.freq_max = np.max(freqs)
+        #self.x_min = np.min(xs)
+        #self.x_max = np.max(xs)
+        #self.l_min = np.min(ls)
+        if spherical_bessel:
+            self.l_max = max_order
+        else:
+            self.nu_max = max_order
 
-        self.interp_spacing = interp_spacing
-        self.x_pad = x_pad
+        self.n_cheb_max = n_cheb_max
+        self.n_cheb_min = n_cheb_min
+        self.n_interp = n_interp
+        #self.freq_min = np.min(freqs)
+        #self.freq_max = np.max(freqs)
+
+        #self.interp_spacing = interp_spacing
+        #self.x_pad = x_pad
         
         self.n_proc = n_proc
         set_num_threads(n_proc)
@@ -37,11 +47,63 @@ class PolyBessel:
         #self.pre_compute_jl()
         #self.pre_compute_trig_int()
         #self.pre_compute_Pl()
-        self.dI0, self.dI1 = precompute_dI_eq33(self.xs, self.freqs, self.ls)
-
-
-    ### Table Functions ###
+        #self.dI0, self.dI1 = precompute_dI_eq33(self.xs, self.freqs, self.ls)
     
+
+        ### Table Functions ###
+        def make_w_levels(ncheb, nmin):
+            """
+            Clenshaw-Curtis weights for the nested rules n = ncheb, ncheb/2, ..., nmin
+            (row l holds the n = ncheb >> l weights in its first n+1 entries; rest is 0).
+            Nodes of level l are u[::2**l], since Chebyshev-Lobatto nodes are nested.
+            Call once, outside numba, alongside u and w.
+            """
+            nlev = int(math.log2(ncheb // nmin)) + 1
+            w_levels = np.zeros((nlev, ncheb + 1))
+            for l in range(nlev):
+                n = ncheb >> l
+                w_levels[l, :n+1] = weights_clenshaw_curtis(n)
+            
+            return w_levels
+    
+        def make_Bessel_table(nu_max, n_interp):
+            """
+            """
+            Jv_int_table = np.zeros((nu_max+1, n_interp))
+            r = np.linspace(0.0, 2.0, n_interp)
+            for nui in range(nu_max+1):
+                xnu = r*nui
+                Jv_int_table[nui, :] = jv(nui, xnu)
+            
+            return Jv_int_table
+
+        self.w_levels = make_w_levels(self.n_cheb_max, self.n_cheb_min)
+        self.Jv_int_table = make_Bessel_table(self.nu_max, self.n_interp)
+
+
+    ### Integration Functions ###
+    
+    def compute_indiviual_integral_double_bessel(self, f, nu1, omega1, nu2, omega2, a, b):
+        """
+        """
+        
+        c = Cheb_coeffs_dct(f(nodes_clenshaw_curtis(8, a, b)))
+        u = nodes_clenshaw_curtis(self.n_cheb_max, -1, 1)
+        
+        return main_integration_Bessel_product(c, u, self.w_levels, self.Jv_int_table, nu1, omega1, nu2, omega2, a, b, ncheb=self.n_cheb_max)
+
+    def compute_many_integral_double_bessel(self, f, nu1_list, omega1_list, nu2_list, omega2_list, a, b):
+        """
+        """
+        
+        c = Cheb_coeffs_dct(f(nodes_clenshaw_curtis(8, a, b)))
+        u = nodes_clenshaw_curtis(self.n_cheb_max, -1, 1)
+
+        # Add vectorized/parallel loop execution
+        
+        return main_integration_Bessel_product(c, u, self.w_levels, self.Jv_int_table, nu1, omega1, nu2, omega2, a, b, ncheb=self.n_cheb_max)
+    
+    '''
     def pre_compute_jl(self):
         """
         """
@@ -93,7 +155,7 @@ class PolyBessel:
         return hankel_transform_multi_l_eq33(self.xs, fx, self.freqs, self.ls, self.dI0, self.dI1)
 
 
-    
+    '''
     '''
     def K_rec_sph_terms(self, n, l, x, k, kprime):
         """
