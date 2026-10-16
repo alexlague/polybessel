@@ -21,6 +21,13 @@ def make_w_levels(ncheb, nmin=16):
         w_levels[l, :n+1] = weights_clenshaw_curtis(n)
     return w_levels
 
+@jit(nopython=True)
+def _log_jmax(nu, omega, b):
+    t = omega*b/nu
+    if t < 1.0:
+        s = math.sqrt(1.0 - t*t)
+        return nu*(math.log(t) + s - math.log1p(s))   # Kapteyn, J increasing below nu
+    return min(0.0, math.log(0.6749) - math.log(nu)/3.0)  # Landau
 
 @jit(nopython=True)
 def _hybrid_nested(c, u, w_levels, nu1, omega1, nu2, omega2, lo, hi, a, b, fplo, fphi):
@@ -131,7 +138,7 @@ def _single_oscillator_piece(c, u, w_levels, Jv_int_table, nu1, omega1, nu2, ome
 
 
 @jit(nopython=True)
-def main_integration_Bessel_product(c, u, w_levels, Jv_int_table, nu1, omega1, nu2, omega2, a, b, ncheb=2048):
+def main_integration_Bessel_product(c, u, w_levels, Jv_int_table, nu1, omega1, nu2, omega2, a, b, ncheb=2048, tol=1e-6):
     """
     Main wrapper to integrate any smooth function f (callable) with two Bessel functions
     f(x) * J_nu1(omega1*x) J_nu2(omega2*x)
@@ -154,8 +161,12 @@ def main_integration_Bessel_product(c, u, w_levels, Jv_int_table, nu1, omega1, n
     # Cheb decomposition of deg 7 of f over the full interval
     #c = Cheb_coeffs_dct(f(xcc[::ncheb//8]))
 
-    if (b*omega1/nu1 < 0.4 and nu1 >= 30) or (b*omega2/nu2 < 0.4 and nu2 >= 30):
-        #print("Case 0")
+    #if (b*omega1/nu1 < 0.4 and nu1 >= 30) or (b*omega2/nu2 < 0.4 and nu2 >= 30):
+    #    #print("Case 0")
+    #    integral = 0.0
+    # Case 0 condition (before Case A)
+    fmax = np.sum(np.abs(c))
+    if math.log((b-a)*fmax) + _log_jmax(nu1, omega1, b) + _log_jmax(nu2, omega2, b) < math.log(tol):
         integral = 0.0
     
     elif a >= 2*max((nu1/omega1, nu2/omega2)):

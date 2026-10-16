@@ -12,10 +12,10 @@ import math
 from integration import weights_clenshaw_curtis, nodes_clenshaw_curtis #clenshaw_curtis_any_interval #filon_sin_quad, filon_cos_quad
 from interpolation import Cheb_coeffs_dct
 #from single_bessel_recurrence import precompute_dI_eq33, hankel_transform_multi_l_eq33
-from main_integration import main_integration_Bessel_product # move to integration?
+from main_integration import main_integration_Bessel_product as MIBP # move to integration?
 
 class PolyBessel:
-    def __init__(self, max_order=100, spherical_bessel=False, n_proc=4, n_cheb_max=2048, n_cheb_min=16, n_interp=4096):
+    def __init__(self, max_order=100, spherical_bessel=False, n_proc=4, n_cheb_max=2048, n_cheb_min=16, n_interp=4096, tol=1e-6):
         """
         """
         #xs, ls, freqs, interp_spacing=0.03, n_proc=4, x_pad=0.7):
@@ -34,6 +34,7 @@ class PolyBessel:
         self.n_cheb_max = n_cheb_max
         self.n_cheb_min = n_cheb_min
         self.n_interp = n_interp
+        self.tol = tol
         #self.freq_min = np.min(freqs)
         #self.freq_max = np.max(freqs)
 
@@ -83,16 +84,16 @@ class PolyBessel:
 
     ### Integration Functions ###
     
-    def compute_indiviual_integral_double_bessel(self, f, nu1, omega1, nu2, omega2, a, b):
+    def compute_indiviual_double_bessel(self, f, nu1, omega1, nu2, omega2, a, b):
         """
         """
         
         c = Cheb_coeffs_dct(f(nodes_clenshaw_curtis(8, a, b)))
         u = nodes_clenshaw_curtis(self.n_cheb_max, -1, 1)
         
-        return main_integration_Bessel_product(c, u, self.w_levels, self.Jv_int_table, nu1, omega1, nu2, omega2, a, b, ncheb=self.n_cheb_max)
+        return MIBP(c, u, self.w_levels, self.Jv_int_table, nu1, omega1, nu2, omega2, a, b, ncheb=self.n_cheb_max, tol=self.tol)
 
-    def compute_many_integral_double_bessel(self, f, nu1_list, omega1_list, nu2_list, omega2_list, a, b):
+    def compute_many_double_bessel(self, f, nu1_list, omega1_list, nu2_list, omega2_list, a, b):
         """
         """
         
@@ -100,8 +101,23 @@ class PolyBessel:
         u = nodes_clenshaw_curtis(self.n_cheb_max, -1, 1)
 
         # Add vectorized/parallel loop execution
-        
-        return main_integration_Bessel_product(c, u, self.w_levels, self.Jv_int_table, nu1, omega1, nu2, omega2, a, b, ncheb=self.n_cheb_max)
+        N1 = len(nu1_list)
+        N2 = len(nu2_list)
+        M1 = len(omega1_list)
+        M2 = len(omega2_list)
+    
+        out = np.zeros((N1, M1, N2, M2))
+    
+        for i1 in range(N1):
+            for i2 in range(N2):
+                for j1 in range(M1):
+                    for j2 in range(M2):
+                        n1, o1, n2, o2 = nu1_list[i1], omega1_list[j1], nu2_list[i2], omega2_list[j2]
+                        wls = self.w_levels
+                        Jtab = self.Jv_int_table
+                        out[i1, j1, i2, j2] = MIBP(c, u, wls, Jtab, n1, o1, n2, o2, a, b, ncheb=self.n_cheb_max, tol=self.tol)
+    
+        return out
     
     '''
     def pre_compute_jl(self):
