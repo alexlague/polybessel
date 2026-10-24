@@ -6,20 +6,20 @@ from IN_integration import IN_Bessel_s2_single_func, IN_Bessel_s2_product_func, 
 #from bessel_interp import   # adjust to wherever this lives
 from integration import weights_clenshaw_curtis
 
-
-def make_w_levels(ncheb, nmin=16):
-    """
-    Clenshaw-Curtis weights for the nested rules n = ncheb, ncheb/2, ..., nmin
-    (row l holds the n = ncheb >> l weights in its first n+1 entries; rest is 0).
-    Nodes of level l are u[::2**l], since Chebyshev-Lobatto nodes are nested.
-    Call once, outside numba, alongside u and w.
-    """
-    nlev = int(math.log2(ncheb // nmin)) + 1
-    w_levels = np.zeros((nlev, ncheb + 1))
-    for l in range(nlev):
-        n = ncheb >> l
-        w_levels[l, :n+1] = weights_clenshaw_curtis(n)
-    return w_levels
+# MOVED TO POLYBESSEL MAIN
+#def make_w_levels(ncheb, nmin=16):
+#    """
+#    Clenshaw-Curtis weights for the nested rules n = ncheb, ncheb/2, ..., nmin
+#    (row l holds the n = ncheb >> l weights in its first n+1 entries; rest is 0).
+#    Nodes of level l are u[::2**l], since Chebyshev-Lobatto nodes are nested.
+#    Call once, outside numba, alongside u and w.
+#    """
+#    nlev = int(math.log2(ncheb // nmin)) + 1
+#    w_levels = np.zeros((nlev, ncheb + 1))
+#    for l in range(nlev):
+#        n = ncheb >> l
+#        w_levels[l, :n+1] = weights_clenshaw_curtis(n)
+#    return w_levels
 
 @jit(nopython=True)
 def _log_jmax(nu, omega, b):

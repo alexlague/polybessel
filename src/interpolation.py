@@ -245,7 +245,7 @@ def jv_interpolation(table, nu, x):
     J_nu(x) for integer 1 <= nu <= table.shape[0]-1:
     tabulated (cubic) for x < 2*nu, Debye expansion for x >= 2*nu.
     """
-    row = table[nu]
+    row = table[int(nu)]
     scale = (row.shape[0] - 1) / (2.0 * nu)
     imax = row.shape[0] - 3
     nuf = float(nu)

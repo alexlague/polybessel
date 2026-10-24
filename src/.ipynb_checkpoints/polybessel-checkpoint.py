@@ -15,7 +15,7 @@ from interpolation import Cheb_coeffs_dct
 from main_integration import main_integration_Bessel_product as MIBP # move to integration?
 
 class PolyBessel:
-    def __init__(self, max_order=100, spherical_bessel=False, n_proc=4, n_cheb_max=2048, n_cheb_min=16, n_interp=4096, tol=1e-6):
+    def __init__(self, max_order=100, spherical_bessel=False, n_proc=1, n_cheb_max=2048, n_cheb_min=16, n_interp=4096, tol=1e-6):
         """
         """
         #xs, ls, freqs, interp_spacing=0.03, n_proc=4, x_pad=0.7):
@@ -26,10 +26,10 @@ class PolyBessel:
         #self.x_min = np.min(xs)
         #self.x_max = np.max(xs)
         #self.l_min = np.min(ls)
-        if spherical_bessel:
-            self.l_max = max_order
-        else:
-            self.nu_max = max_order
+        #if spherical_bessel:
+        #    self.l_max = max_order
+        #else:
+        self.nu_max = max_order
 
         self.n_cheb_max = n_cheb_max
         self.n_cheb_min = n_cheb_min
@@ -37,6 +37,7 @@ class PolyBessel:
         self.tol = tol
         #self.freq_min = np.min(freqs)
         #self.freq_max = np.max(freqs)
+        self.spherical_bessel = spherical_bessel
 
         #self.interp_spacing = interp_spacing
         #self.x_pad = x_pad
@@ -70,11 +71,16 @@ class PolyBessel:
         def make_Bessel_table(nu_max, n_interp):
             """
             """
-            Jv_int_table = np.zeros((nu_max+1, n_interp))
+            Jv_int_table = np.zeros((nu_max+2, n_interp)) # need one more for the derivative
             r = np.linspace(0.0, 2.0, n_interp)
-            for nui in range(nu_max+1):
+            
+            # half integer offset for spherical Bessel
+            off = 0.5 if self.spherical_bessel else 0.0
+            
+            for nui in range(nu_max+2):
+                nui += off
                 xnu = r*nui
-                Jv_int_table[nui, :] = jv(nui, xnu)
+                Jv_int_table[int(nui), :] = jv(nui, xnu)
             
             return Jv_int_table
 
@@ -87,8 +93,18 @@ class PolyBessel:
     def compute_indiviual_double_bessel(self, f, nu1, omega1, nu2, omega2, a, b):
         """
         """
+        if min(nu1, nu2) < 0:
+            raise ValueError("Negative orders not supported.")
+        if min(nu1, nu2) == 0 and spherical_bessel == False:
+            raise ValueError("Order 0 not yet supported for non-spherical Bessel functions.")
         
-        c = Cheb_coeffs_dct(f(nodes_clenshaw_curtis(8, a, b)))
+        f_at_nodes = f(nodes_clenshaw_curtis(8, a, b))
+        if self.spherical_bessel:
+            nu1 = nu1+0.5
+            nu2 = nu2+0.5
+            f_at_nodes *= np.pi/2/nodes_clenshaw_curtis(8, a, b) # j_n = \sqrt(\pi/2x) J_{n+1/2}(x)
+            
+        c = Cheb_coeffs_dct(f_at_nodes)
         u = nodes_clenshaw_curtis(self.n_cheb_max, -1, 1)
         
         return MIBP(c, u, self.w_levels, self.Jv_int_table, nu1, omega1, nu2, omega2, a, b, ncheb=self.n_cheb_max, tol=self.tol)
@@ -96,8 +112,16 @@ class PolyBessel:
     def compute_many_double_bessel(self, f, nu1_list, omega1_list, nu2_list, omega2_list, a, b):
         """
         """
+        if min(nu1, nu2) < 0:
+            raise ValueError("Negative orders not supported.")
+        if min(nu1, nu2) == 0 and spherical_bessel == False:
+            raise ValueError("Order 0 not yet supported for non-spherical Bessel functions.")
         
-        c = Cheb_coeffs_dct(f(nodes_clenshaw_curtis(8, a, b)))
+        f_at_nodes = f(nodes_clenshaw_curtis(8, a, b))
+        if self.spherical_bessel:
+            f_at_nodes *= np.pi/2/nodes_clenshaw_curtis(8, a, b) # j_n = \sqrt(\pi/2x) J_{n+1/2}(x)
+            
+        c = Cheb_coeffs_dct(f_at_nodes)
         u = nodes_clenshaw_curtis(self.n_cheb_max, -1, 1)
 
         # Add vectorized/parallel loop execution
