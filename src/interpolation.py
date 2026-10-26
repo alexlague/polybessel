@@ -239,19 +239,28 @@ def _jv_debye_scalar(nu, nu2, nu3, z):
     xi = s - nu * math.acos(nu / z) - 0.25*math.pi
     return math.sqrt(2.0 / (math.pi * s)) * (A*math.cos(xi) + B*math.sin(xi))
 
+@jit(nopython=True)
+def bessel_switch(nu):
+    """
+    Argument z above which the Debye expansion of J_nu(z) is accurate (<~1e-6):
+    2*nu for large orders, pushed out to nu + 25 for small ones.
+    """
+    return max(2.0 * nu, nu + 25.0)
+
 @jit(nopython=True, fastmath=True)
 def jv_interpolation(table, nu, x):
     """
-    J_nu(x) for integer 1 <= nu <= table.shape[0]-1:
-    tabulated (cubic) for x < 2*nu, Debye expansion for x >= 2*nu.
+    J_nu(x) for 0 < nu <= table.shape[0]-1 (row int(nu)):
+    tabulated (cubic) for x < bessel_switch(nu), Debye expansion above.
     """
     row = table[int(nu)]
-    scale = (row.shape[0] - 1) / (2.0 * nu)
+    zs = bessel_switch(nu)
+    scale = (row.shape[0] - 1) / zs
     imax = row.shape[0] - 3
     nuf = float(nu)
     nu2 = nuf * nuf
     nu3 = nu2 * nuf
-    xmax = 2.0 * nuf
+    xmax = zs
     out = np.empty(x.shape[0])
     for j in range(x.shape[0]):
         z = x[j]
@@ -260,6 +269,67 @@ def jv_interpolation(table, nu, x):
         else:
             out[j] = _jv_debye_scalar(nuf, nu2, nu3, z)
     return out
+
+@jit(nopython=True, fastmath=True)
+def cheb_eval(c, x, a, b):
+    """Evaluate sum_{k=0}^{n} c[k] T_k(t), t = (2x - a - b)/(b - a), for any n (Clenshaw)."""
+    n = c.shape[0]
+    mid = 0.5 * (a + b)
+    s = 2.0 / (b - a)
+    out = np.empty(x.shape[0])
+    for i in range(x.shape[0]):
+        t = s * (x[i] - mid)
+        t2 = 2.0 * t
+        b1 = 0.0
+        b2 = 0.0
+        for k in range(n - 1, 0, -1):
+            b0 = c[k] + t2 * b1 - b2
+            b2 = b1
+            b1 = b0
+        out[i] = c[0] + t * b1 - b2
+    return out
+
+
+@jit(nopython=True, fastmath=True)
+def cheb_deriv_coeffs(c, a, b):
+    """Chebyshev coefficients of d/dx of the series c on [a, b] (length len(c)-1)."""
+    n = c.shape[0] - 1
+    if n == 0:
+        return np.zeros(1)
+    d = np.zeros(n + 1)          # d[n] = 0 sentinel
+    for k in range(n - 1, -1, -1):
+        d[k] = (d[k + 2] if k + 2 <= n else 0.0) + 2.0 * (k + 1) * c[k + 1]
+    d[0] *= 0.5
+    return d[:n] * (2.0 / (b - a))
+
+
+@jit(nopython=True, fastmath=True)
+def cheb_eval_deriv(dc, x, a, b):
+    """Derivative d/dx of the Chebyshev series c on [a, b], at points x."""
+    return cheb_eval(dc, x, a, b)
+
+
+def cheb_fit_adaptive(f, a, b, n_min=16, n_max=512, tol=1e-14):
+    """
+    Chebyshev-Lobatto interpolant of f on [a, b]: double the number of nodes
+    until the last few coefficients are below tol * max|c|. Returns the
+    coefficients truncated to the significant ones.
+    """
+    from integration import nodes_clenshaw_curtis
+    n = n_min
+    while True:
+        c = Cheb_coeffs_dct(np.asarray(f(nodes_clenshaw_curtis(n, a, b)), dtype=float))
+        scale = np.max(np.abs(c))
+        if scale == 0.0:
+            return np.zeros(1)
+        tail = np.max(np.abs(c[-4:]))
+        if tail <= tol * scale or n >= n_max:
+            if tail > tol * scale:
+                import warnings
+                warnings.warn("cheb_fit_adaptive: f not resolved with %d nodes on [%g, %g]" % (n, a, b))
+            keep = np.nonzero(np.abs(c) > tol * scale)[0]
+            return c[: keep[-1] + 1].copy() if keep.size else c[:1].copy()
+        n *= 2
 
 
 '''
