@@ -22,7 +22,7 @@ from integration import weights_clenshaw_curtis
 #    return w_levels
 
 # Precision parameters (might make them variable later)
-cc_density = 0.8 # used to be 1.3
+cc_density = 1.6 # used to be 1.3
 cc_min_nodes = 16 # used to be 64
 
 @jit(nopython=True)
@@ -61,7 +61,7 @@ def _hybrid_nested(c, u, w_levels, nu1, omega1, nu2, omega2, lo, hi, a, b, fplo,
     return IN_Bessel_s2_hybrid_func(nu1, omega1, nu2, omega2, lo, hi, fplo, fphi, nodes[::-1], fx[::-1], wl[::-1])
 
 @jit(nopython=True)
-def _use_IN_product(nu1, omega1, nu2, omega2, lo, hi, kmin=50.0):
+def _use_IN_product(nu1, omega1, nu2, omega2, lo, hi, kmin=100.0):
     """Analytic s2 IN product is accurate only if xi1'-xi2' has no zero on
     [lo, hi] and |xi1'-xi2'|*x >= kmin at both ends (error ~ (|dxi'| x)^-2)."""
     dlo = math.sqrt(omega1*omega1 - (nu1/lo)**2) - math.sqrt(omega2*omega2 - (nu2/lo)**2)
@@ -155,7 +155,7 @@ def _single_oscillator_piece(c, dc, u, w_levels, Jv_int_table, nu1, omega1, nu2,
 #========================================#
 
 @jit(nopython=True)
-def _use_IN_single(nu, omega, lo, hi, f_e, fp_e, fpp_e, kmin=50.0, eta=1e-3):
+def _use_IN_single(nu, omega, lo, hi, f_e, fp_e, fpp_e, kmin=100.0, eta=1e-3):
     """
     True if the analytic s2 IN single-Bessel formula is accurate on [lo, hi]:
     - Bessel side: xi'(x) x = sqrt(omega^2 x^2 - nu^2) >= kmin at lo (smallest there);
@@ -315,7 +315,7 @@ def main_integration_Bessel_product(c, dc, u, w_levels, Jv_int_table, nu1, omega
         fa, fb = cheb_eval(c, np.array([a, b]), a, b) #cheb8(c, np.array([a, b]), a, b)
         fpa, fpb = cheb_eval_deriv(dc, np.array([a, b]), a, b) #cheb8_deriv(c, np.array([a, b]), a, b) # get from endpoints of Cheb expansion
         
-        if _use_IN_product(nu1, omega1, nu2, omega2, a, b, kmin=50.0):
+        if _use_IN_product(nu1, omega1, nu2, omega2, a, b, kmin=100.0):
             #print("Case A1")
             integral = IN_Bessel_s2_product_func(nu1, omega1, nu2, omega2, a, b, fa, fb, fpa, fpb)
         else:
@@ -345,7 +345,7 @@ def main_integration_Bessel_product(c, dc, u, w_levels, Jv_int_table, nu1, omega
         
         # Piece 3/3: b tilde to b
         fb_tilde, fb = cheb_eval(c, np.array([b_tilde, b]), a, b) #cheb8(c, np.array([b_tilde, b]), a, b)
-        fpb_tilde, fpb = cheb_eval_deriv(c, np.array([b_tilde, b]), a, b) #cheb8_deriv(c, np.array([b_tilde, b]), a, b)
+        fpb_tilde, fpb = cheb_eval_deriv(dc, np.array([b_tilde, b]), a, b) #cheb8_deriv(c, np.array([b_tilde, b]), a, b)
         if _use_IN_product(nu1, omega1, nu2, omega2, b_tilde, b):
             integral += IN_Bessel_s2_product_func(nu1, omega1, nu2, omega2, b_tilde, b, fb_tilde, fb, fpb_tilde, fpb)
         else:
