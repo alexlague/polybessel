@@ -61,6 +61,13 @@ def _hybrid_nested(c, u, w_levels, nu1, omega1, nu2, omega2, lo, hi, a, b, fplo,
     return IN_Bessel_s2_hybrid_func(nu1, omega1, nu2, omega2, lo, hi, fplo, fphi, nodes[::-1], fx[::-1], wl[::-1])
 
 @jit(nopython=True)
+def _few_oscillations(nu1, omega1, nu2, omega2, lo, hi, pmin=60.0):
+    """True if the product oscillates less than pmin radians on [lo, hi] (the sum phase
+    rate at hi bounds the total): CC is then about as cheap as IN and exact, so prefer it."""
+    s = math.sqrt(max(omega1*omega1 - (nu1/hi)**2, 0.0)) + math.sqrt(max(omega2*omega2 - (nu2/hi)**2, 0.0))
+    return s*(hi - lo) < pmin
+    
+@jit(nopython=True)
 def _use_IN_product(nu1, omega1, nu2, omega2, lo, hi, kmin=100.0):
     """Analytic s2 IN product is accurate only if xi1'-xi2' has no zero on
     [lo, hi] and |xi1'-xi2'|*x >= kmin at both ends (error ~ (|dxi'| x)^-2)."""
@@ -315,11 +322,11 @@ def main_integration_Bessel_product(c, dc, u, w_levels, Jv_int_table, nu1, omega
         fa, fb = cheb_eval(c, np.array([a, b]), a, b) #cheb8(c, np.array([a, b]), a, b)
         fpa, fpb = cheb_eval_deriv(dc, np.array([a, b]), a, b) #cheb8_deriv(c, np.array([a, b]), a, b) # get from endpoints of Cheb expansion
         
-        if _use_IN_product(nu1, omega1, nu2, omega2, a, b, kmin=100.0):
-            #print("Case A1")
+        if _few_oscillations(nu1, omega1, nu2, omega2, a, b):
+            integral = _cc_composite(c, u, w_levels, Jv_int_table, nu1, omega1, nu2, omega2, a, b, a, b)
+        elif _use_IN_product(nu1, omega1, nu2, omega2, a, b, kmin=100.0):
             integral = IN_Bessel_s2_product_func(nu1, omega1, nu2, omega2, a, b, fa, fb, fpa, fpb)
         else:
-            #print("Case A2")
             integral = _hybrid_nested(c, u, w_levels, nu1, omega1, nu2, omega2, a, b, a, b, fpa, fpb)
     
     elif b <= max((bessel_switch(nu1)/omega1, bessel_switch(nu2)/omega2)): # CC quadrature + single-oscillator IN
@@ -346,7 +353,10 @@ def main_integration_Bessel_product(c, dc, u, w_levels, Jv_int_table, nu1, omega
         # Piece 3/3: b tilde to b
         fb_tilde, fb = cheb_eval(c, np.array([b_tilde, b]), a, b) #cheb8(c, np.array([b_tilde, b]), a, b)
         fpb_tilde, fpb = cheb_eval_deriv(dc, np.array([b_tilde, b]), a, b) #cheb8_deriv(c, np.array([b_tilde, b]), a, b)
-        if _use_IN_product(nu1, omega1, nu2, omega2, b_tilde, b):
+        
+        if _few_oscillations(nu1, omega1, nu2, omega2, b_tilde, b):
+            integral += _cc_composite(c, u, w_levels, Jv_int_table, nu1, omega1, nu2, omega2, b_tilde, b, a, b)
+        elif _use_IN_product(nu1, omega1, nu2, omega2, b_tilde, b):
             integral += IN_Bessel_s2_product_func(nu1, omega1, nu2, omega2, b_tilde, b, fb_tilde, fb, fpb_tilde, fpb)
         else:
             integral += _hybrid_nested(c, u, w_levels, nu1, omega1, nu2, omega2, b_tilde, b, a, b, fpb_tilde, fpb)
