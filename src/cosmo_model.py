@@ -492,13 +492,14 @@ def power_spectrum_multipole(W_diagonal, V, q_weights, P_q, L, l_max, I22=None):
 
 
 def compute_multipoles(kernel, multipoles, ks, qs, weights, transform, q_weights, P_q,
-                       l_max, I22=None, cross_kernel=None):
+                       l_max, I22=None, cross_kernel=None, tables_function=None):
     """
     P_L(k) for every L in `multipoles`, with all tables computed in one pass.
 
     kernel       : W^ℓ_ℓ of the field carrying the shifted index a (X): the field
                    weighted by L_L(k̂·x̂) in the Yamamoto estimator, F_L[X](k) F_0[Y](-k).
     cross_kernel : W^ℓ_ℓ of the second field (Y); None for an auto-spectrum.
+    tables_function : optional table backend, as in compute_kernels.
     Returns {L: array over ks}.
 
     Sign check (plane-parallel limit, kernel = galaxies, cross_kernel = velocity):
@@ -506,7 +507,8 @@ def compute_multipoles(kernel, multipoles, ks, qs, weights, transform, q_weights
     """
     diagonal = cross_kernel or kernel
     partners = {L: multipole_partner_kernel(kernel, L) for L in multipoles}
-    W = compute_kernels([diagonal, *partners.values()], ks, qs, weights, transform)
+    W = compute_kernels([diagonal, *partners.values()], ks, qs, weights, transform,
+                        tables_function=tables_function)
     return {L: power_spectrum_multipole(W[diagonal.name], W[partner.name], q_weights, P_q,
                                         L, l_max, I22)
             for L, partner in partners.items()}
@@ -516,17 +518,25 @@ def compute_multipoles(kernel, multipoles, ks, qs, weights, transform, q_weights
 # One call: tables for all kernels, then the kernels
 # ---------------------------------------------------------------------------
 
-def compute_kernels(kernels, ks, qs, weights, transform, return_tables=False):
+def compute_kernels(kernels, ks, qs, weights, transform, return_tables=False, tables_function=None):
     """
     Evaluate several RadialKernel objects on the (ks, qs, ℓ) grid.
 
-    All tables needed by all kernels are computed in a single pass of
-    bpk.compute_tables, so shared weights, powers, edges and |N| are reused.
+    All tables needed by all kernels are computed in a single pass, so shared
+    weights, powers, edges and |N| are reused.
 
-    Returns {kernel.name: array (len(ks), len(qs), transform.n_points)},
+    tables_function : optional callable (ks, qs, weights, requests) -> tables,
+                      used instead of bpk.compute_tables (then `transform` is
+                      ignored and may be None). E.g. a
+                      gauss_legendre_tables.GaussLegendreTables built for ks, qs.
+
+    Returns {kernel.name: array (len(ks), len(qs), n_ell)},
     and the tables as a second value if return_tables is True.
     """
     requests = sorted({key for kernel in kernels for key in kernel.required_tables()})
-    tables = bpk.compute_tables(ks, qs, weights, requests, transform)
+    if tables_function is None:
+        tables = bpk.compute_tables(ks, qs, weights, requests, transform)
+    else:
+        tables = tables_function(ks, qs, weights, requests)
     results = {kernel.name: kernel.evaluate(tables, ks, qs) for kernel in kernels}
     return (results, tables) if return_tables else results
