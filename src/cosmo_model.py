@@ -79,11 +79,9 @@ Bessel order a in Eq. 6.
 """
 
 from dataclasses import dataclass, replace
-from functools import lru_cache
 from typing import Callable, Optional
 
 import numpy as np
-from sympy.physics.wigner import wigner_3j
 
 import bessel_product_kernels as bpk
 
@@ -415,12 +413,60 @@ def jacobian_weight_function(R, f=1.0, D=1.0, dR_dx=None, relative_step=1e-5):
 # P_L so that P_0 -> P(k) for a large window; it was checked against the
 # Kaiser limit for L = 0, 2, 4.
 
-@lru_cache(maxsize=None)
-def three_j_squared(a, L, b):
-    """(a L b; 0 0 0)² from sympy (exact, cached). Zero if any order is negative."""
-    if a < 0 or b < 0:
-        return 0.0
-    return float(wigner_3j(a, L, b, 0, 0, 0) ** 2)
+#
+# The squared 3j symbols follow Kiddier & Gratton 2026 (arXiv:2602.15605,
+# Sec. 3), i.e. Edmonds (1957) Eq. 3.7.17 in halved variables. With
+# J = ℓ1 + ℓ2 + ℓ3 even, p = J/2 and p_i = p - ℓ_i,
+#
+#   (ℓ1 ℓ2 ℓ3; 0 0 0)² = g(p1) g(p2) g(p3) / [(J+1) g(p)],
+#   g(p) = (2p)! / (2^{2p} (p!)²),   g(p) = (p - 1/2)/p · g(p-1),  g(0) = 1.
+#
+# The 2^{2p} factors cancel in the ratio but keep g slowly varying,
+# g(p) ~ (πp)^{-1/2}, so nothing overflows. g is tabulated once from the
+# recurrence, summed in logarithms; each symbol is then three table lookups
+# and a few multiplications. The symbol is zero for odd J or when the
+# triangle condition fails (some p_i < 0).
+
+class _CentralBinomialTable:
+    """g(p) = (2p)! / (2^{2p} (p!)²) for integer p >= 0, tabulated and grown on demand."""
+
+    def __init__(self):
+        self.values = np.ones(1)                          # g(0) = 1
+
+    def _rebuild(self, size):
+        p = np.arange(1, size)
+        log_g = np.cumsum(np.log1p(-0.5 / p))             # Σ ln((p - 1/2)/p)
+        self.values = np.exp(np.concatenate([[0.0], log_g]))
+
+    def __call__(self, p):
+        p = np.asarray(p, dtype=int)
+        needed = int(p.max(initial=0)) + 1
+        if needed > len(self.values):
+            self._rebuild(max(needed, 2 * len(self.values)))
+        return self.values[p]
+
+
+_central_binomial = _CentralBinomialTable()
+
+
+def three_j_squared(l1, l2, l3):
+    """
+    (ℓ1 ℓ2 ℓ3; 0 0 0)² for integer orders (scalars or broadcastable arrays).
+    Zero if any order is negative, J = ℓ1 + ℓ2 + ℓ3 is odd, or the triangle
+    condition fails. Method of arXiv:2602.15605 (see the comment above).
+    """
+    l1, l2, l3 = np.broadcast_arrays(*(np.asarray(l, dtype=int) for l in (l1, l2, l3)))
+    J = l1 + l2 + l3
+    p = J // 2
+    p1, p2, p3 = p - l1, p - l2, p - l3
+    allowed = ((l1 >= 0) & (l2 >= 0) & (l3 >= 0) & (J % 2 == 0)
+               & (p1 >= 0) & (p2 >= 0) & (p3 >= 0))
+
+    # Send the forbidden entries to J = 0 so every lookup is valid, then zero them.
+    J, p, p1, p2, p3 = (np.where(allowed, x, 0) for x in (J, p, p1, p2, p3))
+    g = _central_binomial
+    value = g(p1) * g(p2) * g(p3) / ((J + 1) * g(p))
+    return np.where(allowed, value, 0.0)[()]
 
 
 def multipole_phase(L):
@@ -445,9 +491,8 @@ class MultipoleCoefficient:
     def __call__(self, ell):
         ell = np.asarray(ell).astype(int)
         sign = round((1j ** (-self.s) / multipole_phase(self.L)).real)   # exactly ±1
-        values = [three_j_squared(int(l) + self.s, self.L, int(l)) * (2 * (l + self.s) + 1)
-                  for l in ell.ravel()]
-        return sign * np.array(values, dtype=float).reshape(ell.shape)
+        a = ell + self.s
+        return sign * (2 * a + 1) * three_j_squared(a, self.L, ell)
 
 
 def shift_first_bessel(kernel, s, name=None):
